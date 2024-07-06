@@ -1,12 +1,12 @@
+from __future__ import annotations
+
 from pathlib import Path
 from functools import partial
 from packaging import version
-from contextlib import nullcontext, contextmanager
+from contextlib import nullcontext
 
 import torch
-from torch import nn, Tensor
 from torch.nn import Module
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import _LRScheduler
 
@@ -18,9 +18,9 @@ from pytorch_custom_utils import (
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 
-from beartype import beartype
-from beartype.door import is_bearable
-from beartype.typing import Optional, Tuple, Type, List
+
+from beartype.typing import Tuple, Type, List
+from meshgpt_pytorch.typing import typecheck, beartype_isinstance
 
 from ema_pytorch import EMA
 
@@ -66,7 +66,7 @@ def maybe_del(d: dict, *keys):
 # autoencoder trainer
 
 class MeshAutoencoderTrainer(Module):
-    @beartype
+    @typecheck
     def __init__(
         self,
         model: MeshAutoencoder,
@@ -80,13 +80,15 @@ class MeshAutoencoderTrainer(Module):
         learning_rate: float = 1e-4,
         weight_decay: float = 0.,
         max_grad_norm: float | None = None,
-        ema_kwargs: dict = dict(),
+        ema_kwargs: dict = dict(
+            use_foreach = True
+        ),
         scheduler: Type[_LRScheduler] | None = None,
         scheduler_kwargs: dict = dict(),
         accelerator_kwargs: dict = dict(),
         optimizer_kwargs: dict = dict(),
         checkpoint_every = 1000,
-        checkpoint_every_epoch: Optional[int] = None,
+        checkpoint_every_epoch: Type[int] | None = None,
         checkpoint_folder = './checkpoints',
         data_kwargs: Tuple[str, ...] = ('vertices', 'faces', 'face_edges'),
         warmup_steps = 1000,
@@ -124,6 +126,7 @@ class MeshAutoencoderTrainer(Module):
 
         self.dataloader = DataLoader(
             dataset,
+            shuffle = True,
             batch_size = batch_size, 
             drop_last = True,
             collate_fn = partial(custom_collate, pad_id = model.pad_id)
@@ -139,12 +142,18 @@ class MeshAutoencoderTrainer(Module):
 
             self.val_dataloader = DataLoader(
                 val_dataset,
+                shuffle = True,
                 batch_size = batch_size, 
                 drop_last = True,
                 collate_fn = partial(custom_collate, pad_id = model.pad_id)
             )
-
-        self.data_kwargs = data_kwargs
+            
+        if hasattr(dataset, 'data_kwargs') and exists(dataset.data_kwargs):
+            assert beartype_isinstance(dataset.data_kwargs, List[str])
+            self.data_kwargs = dataset.data_kwargs
+        else:
+            self.data_kwargs = data_kwargs
+ 
 
         (
             self.model,
@@ -169,24 +178,6 @@ class MeshAutoencoderTrainer(Module):
 
     def tokenize(self, *args, **kwargs):
         return self.ema_tokenizer.tokenize(*args, **kwargs)
-
-    @contextmanager
-    @beartype
-    def trackers(
-        self,
-        project_name: str,
-        run_name: Optional[str] = None,
-        hps: Optional[dict] = None
-    ):
-        assert self.use_wandb_tracking
-
-        self.accelerator.init_trackers(project_name, config = hps)
-
-        if exists(run_name):
-            self.accelerator.trackers[0].run.name = run_name
-
-        yield
-        self.accelerator.end_training()
 
     def log(self, **data_kwargs):
         self.accelerator.log(data_kwargs, step = self.step.item())
@@ -417,7 +408,7 @@ class MeshAutoencoderTrainer(Module):
 # mesh transformer trainer
 
 class MeshTransformerTrainer(Module):
-    @beartype
+    @typecheck
     def __init__(
         self,
         model: MeshTransformer,
@@ -431,14 +422,14 @@ class MeshTransformerTrainer(Module):
         val_dataset: Dataset | None = None,
         val_every = 1,
         val_num_batches = 5,
-        scheduler: Optional[Type[_LRScheduler]] = None,
+        scheduler: Type[_LRScheduler] | None = None,
         scheduler_kwargs: dict = dict(),
         ema_kwargs: dict = dict(),
         accelerator_kwargs: dict = dict(),
         optimizer_kwargs: dict = dict(),
         
         checkpoint_every = 1000, 
-        checkpoint_every_epoch: Optional[int] = None,
+        checkpoint_every_epoch: Type[int] | None = None,
         checkpoint_folder = './checkpoints',
         data_kwargs: Tuple[str, ...] = ('vertices', 'faces', 'face_edges', 'text'),
         warmup_steps = 1000,
@@ -479,6 +470,7 @@ class MeshTransformerTrainer(Module):
 
         self.dataloader = DataLoader(
             dataset,
+            shuffle = True,
             batch_size = batch_size, 
             drop_last = True,
             collate_fn = partial(custom_collate, pad_id = model.pad_id)
@@ -494,12 +486,17 @@ class MeshTransformerTrainer(Module):
 
             self.val_dataloader = DataLoader(
                 val_dataset,
+                shuffle = True,
                 batch_size = batch_size, 
                 drop_last = True,
                 collate_fn = partial(custom_collate, pad_id = model.pad_id)
             )
-
-        self.data_kwargs = data_kwargs
+ 
+        if hasattr(dataset, 'data_kwargs') and exists(dataset.data_kwargs):
+            assert beartype_isinstance(dataset.data_kwargs, List[str])
+            self.data_kwargs = dataset.data_kwargs
+        else:
+            self.data_kwargs = data_kwargs
 
         (
             self.model,
@@ -517,24 +514,6 @@ class MeshTransformerTrainer(Module):
         self.checkpoint_every = checkpoint_every
         self.checkpoint_folder = Path(checkpoint_folder)
         self.checkpoint_folder.mkdir(exist_ok = True, parents = True)
-
-    @contextmanager
-    @beartype
-    def trackers(
-        self,
-        project_name: str,
-        run_name: Optional[str] = None,
-        hps: Optional[dict] = None
-    ):
-        assert self.use_wandb_tracking
-
-        self.accelerator.init_trackers(project_name, config = hps)
-
-        if exists(run_name):
-            self.accelerator.trackers[0].run.name = run_name
-
-        yield
-        self.accelerator.end_training()
 
     def log(self, **data_kwargs):
         self.accelerator.log(data_kwargs, step = self.step.item())
