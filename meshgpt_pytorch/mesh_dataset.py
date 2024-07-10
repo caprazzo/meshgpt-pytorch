@@ -64,7 +64,7 @@ class MeshDataset(Dataset):
         
     @classmethod
     def load(cls, path):   
-        loaded_data = np.load(path, allow_pickle=True)  
+        loaded_data = np.load(path, mmap_mode="r", allow_pickle=True)  
         data = []
         for item in loaded_data["arr_0"]:
             data.append(item)  
