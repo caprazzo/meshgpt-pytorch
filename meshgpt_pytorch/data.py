@@ -85,7 +85,7 @@ def cache_text_embeds_for_dataset(
         else:
             # cache
 
-            text_embed = get_text_embed(text)
+            text_embed = embed_texts_fn([text])[0]
             text_embed = pad_or_slice_to(text_embed, max_text_len, dim = 0, pad_value = 0.)
 
             is_cached[idx] = True
@@ -93,12 +93,6 @@ def cache_text_embeds_for_dataset(
 
         mask = ~reduce(text_embed == 0, 'n d -> n', 'all')
         return text_embed[mask]
-
-    # get text embedding
-
-    def get_text_embed(text: str):
-        text_embeds = embed_texts_fn([text])
-        return text_embeds[0]
 
     # inner function
 
@@ -141,6 +135,118 @@ def cache_text_embeds_for_dataset(
                         continue
 
                     new_items.append(get_text_embed_(maybe_text))
+
+                items = tuple(new_items)
+
+            return items
+
+        dataset_klass.__init__ = __init__
+        dataset_klass.__getitem__ = __getitem__
+
+        return dataset_klass
+
+    return inner
+
+
+# decorator for auto-caching images -> image embeds
+
+@typecheck
+def cache_image_embeds_for_dataset(
+    embed_images_fn: Callable[[Tensor], Tensor],
+    image_shape: Tuple[int, int, int],
+    max_image_embeds_len: int,
+    cache_path: str = './image_embed_cache'
+):
+    # create path to cache folder
+
+    path = Path(cache_path)
+    path.mkdir(exist_ok = True, parents = True)
+    assert path.is_dir()
+
+    # global memmap handles
+
+    image_embed_cache = None
+    is_cached = None
+
+    # cache function
+
+    def get_maybe_cached_image_embed(
+        idx: int,
+        dataset_len: int,
+        image: Tensor,
+        memmap_file_mode = 'w+'
+    ):
+        nonlocal image_embed_cache
+        nonlocal is_cached
+
+        # init cache on first call
+
+        if not exists(image_embed_cache):
+            test_image_embed = embed_images_fn(torch.randn(1, *image_shape))
+            feat_dim = test_image_embed.shape[-1]
+            shape = (dataset_len, max_image_embeds_len, feat_dim)
+
+            image_embed_cache = open_memmap(str(path / 'cache.image_embed.memmap.npy'), mode = memmap_file_mode, dtype = 'float32', shape = shape)
+            is_cached = open_memmap(str(path / 'cache.is_cached.memmap.npy'), mode = memmap_file_mode, dtype = 'bool', shape = (dataset_len,))
+
+        # determine whether to fetch from cache
+        # or call text model
+
+        if is_cached[idx]:
+            image_embed = torch.from_numpy(image_embed_cache[idx])
+        else:
+            # cache
+
+            image_embed = embed_images_fn(image.unsqueeze(0))[0]
+            image_embed = pad_or_slice_to(image_embed, max_image_embeds_len, dim = 0, pad_value = 0.)
+
+            is_cached[idx] = True
+            image_embed_cache[idx] = image_embed.cpu().numpy()
+
+        mask = ~reduce(image_embed == 0, 'n d -> n', 'all')
+        return image_embed[mask]
+
+    # inner function
+
+    def inner(dataset_klass):
+        assert issubclass(dataset_klass, Dataset)
+
+        orig_init = dataset_klass.__init__
+        orig_get_item = dataset_klass.__getitem__
+
+        def __init__(
+            self,
+            *args,
+            cache_memmap_file_mode = 'w+',
+            **kwargs
+        ):
+            orig_init(self, *args, **kwargs)
+
+            self._cache_memmap_file_mode = cache_memmap_file_mode
+
+            if hasattr(self, 'data_kwargs'):
+                self.data_kwargs = [('image_embeds' if data_kwarg == 'images' else data_kwarg) for data_kwarg in self.data_kwargs]
+
+        def __getitem__(self, idx):
+            items = orig_get_item(self, idx)
+
+            get_image_embed_ = partial(get_maybe_cached_image_embed, idx, len(self), memmap_file_mode = self._cache_memmap_file_mode)
+
+            if isinstance(items, dict):
+                if 'images' in items:
+                    image_embed = get_image_embed_(items['images'])
+                    items['image_embeds'] = image_embed
+                    del items['images']
+
+            elif isinstance(items, tuple):
+                new_items = []
+
+                for maybe_image in items:
+                    if not is_tensor(maybe_image):
+                        new_items.append(maybe_image)
+                        continue
+
+                    new_items.append(get_image_embed_(maybe_image))
 
                 items = tuple(new_items)
 
@@ -361,8 +467,6 @@ def custom_collate(data, pad_id = -1):
             datum = pad_sequence(datum, batch_first = True, padding_value = pad_id)
         else:
             datum = list(datum)
-            output.append(datum)
-
         output.append(datum)
 
     output = tuple(output)
