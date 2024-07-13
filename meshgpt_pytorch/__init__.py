@@ -1,6 +1,7 @@
 from meshgpt_pytorch.meshgpt_pytorch import (
     MeshAutoencoder,
-    MeshTransformer
+    MeshTransformer,
+    MultiModalEmbeddingReturner
 )
 
 from meshgpt_pytorch.trainer import (

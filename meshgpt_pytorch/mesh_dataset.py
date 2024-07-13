@@ -5,7 +5,7 @@ from tqdm import tqdm
 import torch
 from meshgpt_pytorch import (
     MeshAutoencoder,
-    MeshTransformer
+    MultiModalEmbeddingReturner
 )
 
 from meshgpt_pytorch.data import (
@@ -136,19 +136,16 @@ class MeshDataset(Dataset):
         self.sort_dataset_keys()
         print(f"[MeshDataset] Generated codes for {len(self.data)} entries")
 
-    def embed_texts(self, transformer: MeshTransformer, batch_size = 50):
+    def embed_texts(self, conditioner: MultiModalEmbeddingReturner, batch_size=50):
         unique_texts = list(set(item['texts'] for item in self.data if 'texts' in item))
         text_embedding_dict = {}
 
         if len(unique_texts) > 0:
             for i in tqdm(range(0, len(unique_texts), batch_size)):
-                batch_texts = unique_texts[i:i+batch_size]
-                text_embeddings = transformer.embed_texts(batch_texts)
-                mask = (text_embeddings != transformer.conditioner.text_embed_pad_value).all(dim=-1)
-
+                batch_texts = unique_texts[i:i + batch_size]
+                text_embeddings, _ = conditioner(texts=batch_texts)  # Get text embeddings
                 for idx, text in enumerate(batch_texts):
-                    masked_embedding = text_embeddings[idx][mask[idx]]
-                    text_embedding_dict[text] = masked_embedding
+                    text_embedding_dict[text] = text_embeddings[idx]
 
         for item in self.data:
             if 'texts' in item:
@@ -158,22 +155,24 @@ class MeshDataset(Dataset):
         self.sort_dataset_keys()
         print(f"[MeshDataset] Generated {len(text_embedding_dict)} text_embeddings")
 
-    def embed_images(self, transformer: MeshTransformer, batch_size = 25):
-        data_to_process = [(idx, item) for idx, item in enumerate(self.data) if 'images' in item and 'image_embeds' not in item]
+    def embed_images(self, conditioner: MultiModalEmbeddingReturner, batch_size=25):
+        data_to_process = [(idx, item) for idx, item in enumerate(self.data)
+                          if 'images' in item and 'image_embeds' not in item]
         total_batches = (len(data_to_process) + batch_size - 1) // batch_size
 
         for i in tqdm(range(0, len(data_to_process), batch_size), total=total_batches):
-            batch_data = data_to_process[i:i+batch_size]
+            batch_data = data_to_process[i:i + batch_size]
 
             if not batch_data:
                 continue
 
             idxs, items = zip(*batch_data)
-            batch_images = torch.stack([item['images'] for item in items]).to(transformer.device)
+            batch_images = torch.stack([item['images'] for item in items]).to(conditioner.device)
 
-            batch_image_embeds = transformer.embed_images(batch_images)
+            # Use conditioner.forward() to get image embeddings, passing None for texts 
+            _, image_embeddings = conditioner(images=batch_images, texts=None) 
 
-            for idx, image_embeds in zip(idxs, batch_image_embeds):
+            for idx, image_embeds in zip(idxs, image_embeddings):
                 self.data[idx]['image_embeds'] = image_embeds
 
         for item in self.data:

@@ -1092,7 +1092,7 @@ class MultiModalEmbeddingReturner(nn.Module):
         *,
         condition_on_text: bool,
         condition_on_image: bool,
-        clip_model_name: str = 'openai/clip-vit-base-patch32',
+        clip_model_name: str = 'openai/clip-vit-large-patch14-336',
         cond_drop_prob: float = 0.25,
         text_embed_pad_value: float = -1.
     ):
@@ -1107,17 +1107,15 @@ class MultiModalEmbeddingReturner(nn.Module):
 
         assert 0. <= cond_drop_prob <= 1.
         self.cond_drop_prob = cond_drop_prob
-
         self.text_embed_pad_value = text_embed_pad_value
 
         self.dim_text = self.clip_model.config.text_config.hidden_size
         self.dim_image = self.clip_model.config.vision_config.hidden_size
-
         self.dim_latent = sum(filter(exists, (self.dim_text, self.dim_image)))
 
     @property
     def device(self):
-        return next(self.parameters()).device
+        return self.clip_model.device # Get the device of the CLIP model
 
     @typecheck
     def forward(
@@ -1189,6 +1187,7 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
     def __init__(
         self,
         autoencoder: MeshAutoencoder,
+        conditioner: MultiModalEmbeddingReturner,
         *,
         dim: int | Tuple[int, int] = 512,
         max_seq_len = 8192,
@@ -1213,11 +1212,7 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
         fine_cross_attend_cond = False,
         pad_id = -1,
         num_sos_tokens = None,
-        condition_on_text = False,
-        condition_on_image = False,
         cond_with_film = False,
-        clip_model_name: str = 'openai/clip-vit-base-patch32', # use this name to load the desired clip model
-        cond_drop_prob = 0.25,
         quads = False,
     ):
         super().__init__()
@@ -1236,10 +1231,13 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
         self.eos_token_id = self.codebook_size
 
         # the fine transformer sos token
-        # as well as a projection of pooled text embeddings to condition it
-
-        num_sos_tokens = default(num_sos_tokens, 1 if not (condition_on_text or condition_on_image) else 4)
-        assert num_sos_tokens > 0
+        # as well as a projection of pooled embeddings to condition it
+        if num_sos_tokens is None:
+            num_sos_tokens = 1  # Default to 1 if not specified
+            if self.conditioner.has_text_conditioner:
+                num_sos_tokens += 1
+            if self.conditioner.has_image_conditioner:
+                num_sos_tokens += 1
 
         self.num_sos_tokens = num_sos_tokens
         self.sos_token = nn.Parameter(torch.randn(num_sos_tokens, dim))
@@ -1257,25 +1255,8 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
 
         self.max_seq_len = max_seq_len
 
-        # text condition
-
-        self.condition_on_text = condition_on_text
-        self.condition_on_image = condition_on_image
-
-        self.conditioner = None
-        cross_attn_dim_context = None
-
-        if self.condition_on_text or self.condition_on_image:
-            self.conditioner = MultiModalEmbeddingReturner(
-                condition_on_text = condition_on_text,
-                condition_on_image = condition_on_image,
-                clip_model_name = clip_model_name, # pass the CLIP model name here
-                cond_drop_prob = cond_drop_prob,
-                text_embed_pad_value = -1.
-            )
-
-            cross_attn_dim_context = self.conditioner.dim_latent
-
+        self.conditioner = conditioner
+        cross_attn_dim_context = self.conditioner.dim_latent
 
         # for summarizing the vertices of each face
 
@@ -1285,7 +1266,6 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
         )
 
         self.coarse_gateloop_block = GateLoopBlock(dim, depth = coarse_pre_gateloop_depth, use_heinsen = gateloop_use_heinsen) if coarse_pre_gateloop_depth > 0 else None
-
         self.coarse_post_gateloop_block = GateLoopBlock(dim, depth = coarse_post_gateloop_depth, use_heinsen = gateloop_use_heinsen) if coarse_post_gateloop_depth > 0 else None
 
         # main autoregressive attention network
@@ -1336,11 +1316,11 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
 
         # film conditioning
 
-        self.text_coarse_film_cond = FiLM(self.conditioner.dim_text, dim) if cond_with_film and condition_on_text else identity
-        self.text_fine_film_cond = FiLM(self.conditioner.dim_text, dim_fine) if cond_with_film and condition_on_text else identity
+        self.text_coarse_film_cond = FiLM(self.conditioner.dim_text, dim) if cond_with_film and self.conditioner.has_text_conditioner else identity
+        self.text_fine_film_cond = FiLM(self.conditioner.dim_text, dim_fine) if cond_with_film and self.conditioner.has_text_conditioner else identity
 
-        self.image_coarse_film_cond = FiLM(self.conditioner.dim_image, dim) if cond_with_film and condition_on_image else identity
-        self.image_fine_film_cond = FiLM(self.conditioner.dim_image, dim_fine) if cond_with_film and condition_on_image else identity
+        self.image_coarse_film_cond = FiLM(self.conditioner.dim_image, dim) if cond_with_film and self.conditioner.has_image_conditioner else identity
+        self.image_fine_film_cond = FiLM(self.conditioner.dim_image, dim_fine) if cond_with_film and self.conditioner.has_image_conditioner else identity
 
         # to logits
 
@@ -1392,28 +1372,6 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
     def device(self):
         return next(self.parameters()).device
 
-    @typecheck
-    @torch.no_grad()
-    def embed_texts(self, texts: str | List[str]):
-        single_text = not isinstance(texts, list)
-        if single_text:
-            texts = [texts]
-
-        assert exists(self.conditioner)
-        text_embeds = self.conditioner.text_embedder(texts).detach()
-
-        if single_text:
-            text_embeds = text_embeds[0]
-
-        return text_embeds
-
-    @typecheck
-    @torch.no_grad()
-    def embed_images(self, images: Tensor):
-        assert exists(self.conditioner)
-        image_embeds = self.conditioner.image_embedder(images).detach()
-        return image_embeds
-
     @eval_decorator
     @torch.no_grad()
     @typecheck
@@ -1444,7 +1402,7 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
 
             batch_size = prompt.shape[0]
 
-        if self.condition_on_text or self.condition_on_image:
+        if self.conditioner.has_text_conditioner or self.conditioner.has_image_conditioner:
             assert any(exists(t) for t in (texts, text_embeds, images, image_embeds))
 
         batch_size = default(batch_size, 1)
@@ -1593,7 +1551,7 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
 
         attn_context_kwargs = dict()
 
-        if self.condition_on_text or self.condition_on_image:
+        if self.conditioner.has_text_conditioner or self.conditioner.has_image_conditioner:
             cond, cond_mask = self.conditioner(
                 texts = texts,
                 text_embeds = text_embeds,
@@ -1713,8 +1671,13 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
             need_call_first_transformer = face_codes_len > cached_face_codes_len_without_sos
         else:
             # auto prepend sos token
-
-            sos = repeat(self.sos_token, 'n d -> b n d', b = batch)
+            # Select the correct SOS token based on conditioning
+            sos_index = 0  # Default to the first SOS token (no conditioning)
+            if self.conditioner.has_text_conditioner and exists(texts):
+                sos_index += 1
+            if self.conditioner.has_image_conditioner and exists(images):
+                sos_index += 1
+            sos = repeat(self.sos_token[sos_index], 'n d -> b n d', b = batch)
             face_codes, packed_sos_shape = pack([sos, face_codes], 'b * d')
 
             # if no kv cache, always call first transformer
@@ -1726,10 +1689,10 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
         # condition face codes with text and / or images
 
         if exists(pooled_cond):
-            if self.condition_on_text:
+            if self.conditioner.has_text_conditioner:
                 face_codes = self.text_coarse_film_cond(face_codes, pooled_cond)
 
-            if self.condition_on_image:
+            if self.conditioner.has_image_conditioner:
                 face_codes = self.image_coarse_film_cond(face_codes, pooled_cond)
 
         # attention on face codes (coarse)
@@ -1834,10 +1797,10 @@ class MeshTransformer(Module, PyTorchModelHubMixin):
 
             pooled_cond = repeat(pooled_cond, 'b ... -> (b r) ...', r = repeat_batch)
 
-            if self.condition_on_text:
+            if self.conditioner.has_text_conditioner:
                 fine_vertex_codes = self.text_fine_film_cond(fine_vertex_codes, pooled_cond)
 
-            if self.condition_on_image:
+            if self.conditioner.has_image_conditioner:
                 fine_vertex_codes = self.image_fine_film_cond(fine_vertex_codes, pooled_cond)
 
         # fine transformer
