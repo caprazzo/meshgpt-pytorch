@@ -4,18 +4,9 @@
 # In[1]:
 
 
-import os
-os.getcwd()
-
-
-# In[2]:
-
-
 project_name = "model_M0001"
-dataset_path = f"../datasets/objverse_shapenet_modelnet_max_250faces_186M_tokens.npz"
-encoder_parameters_path = f'2024-07-23-M0001-encoder-loss_0.170.pt'
-decoder_paramters_restart_path = f'mesh-transformer.ckpt.epoch_32_avg_loss_0.568.pt'
-decoder_paramters_save_path = f'mesh-transformer-lr_e3.pt'
+dataset_path = f"datasets/objverse_shapenet_modelnet_max_250faces_186M_tokens.npz"
+encoder_parameters_path = f'{project_name}/2024-07-23-M0001-encoder-loss_0.170.pt'
 restart_training_checkpoint_path = None
 
 import torch
@@ -37,7 +28,7 @@ from meshgpt_pytorch.data import (
 ) 
 
 
-# In[3]:
+# In[2]:
 
 
 from pathlib import Path 
@@ -54,7 +45,7 @@ dataset = MeshDataset.load(dataset_path)
 print(f"Loaded datasset with keys {dataset.data[0].keys()}")
 
 
-# In[4]:
+# In[3]:
 
 
 autoencoder = MeshAutoencoder(     
@@ -73,7 +64,7 @@ total_params = f"{total_params / 1000000:.1f}M"
 print(f"Encoder Total parameters: {total_params}")
 
 
-# In[5]:
+# In[4]:
 
 
 pkg = torch.load(encoder_parameters_path) 
@@ -85,7 +76,7 @@ del pkg
 #      param.requires_grad = True
 
 
-# In[6]:
+# In[5]:
 
 
 import gc  
@@ -115,7 +106,7 @@ total_params = f"{total_params / 1000000:.1f}M"
 print(f"Decoder total parameters: {total_params}")
 
 
-# In[7]:
+# In[6]:
 
 
 labels = list(set(item["texts"] for item in dataset.data))
@@ -126,16 +117,16 @@ print(dataset.data[0].keys())
 
 # **Train to about 0.0001 loss (or less) if you are using a small dataset**
 
-# In[10]:
+# In[7]:
 
 
 batch_size = 3 # Max 64
 grad_accum_every = 20
 
 # Set the maximal batch size (max 64) that your VRAM can handle and then use grad_accum_every to create a effective batch size of 64, e.g  4 * 16 = 64
-learning_rate = 1e-3 # Start training with the learning rate at 1e-2 then lower it to 1e-3 at stagnation or at 0.5 loss.
+learning_rate = 1e-2 # Start training with the learning rate at 1e-2 then lower it to 1e-3 at stagnation or at 0.5 loss.
 
-trainer = MeshTransformerTrainer(model = transformer, warmup_steps=10, num_train_steps=100, dataset = dataset,
+trainer = MeshTransformerTrainer(model = transformer,warmup_steps = 10,num_train_steps=100, dataset = dataset,
                                  grad_accum_every=grad_accum_every,
                                  learning_rate = learning_rate,
                                  batch_size=batch_size,
@@ -145,10 +136,10 @@ trainer = MeshTransformerTrainer(model = transformer, warmup_steps=10, num_train
                                  # accelerator_kwargs = {"mixed_precision" : "fp16"}, optimizer_kwargs = { "eps": 1e-7} 
                                  )
 
-print(f"Loading from checkpoint {decoder_paramters_restart_path}")
-trainer.load(decoder_paramters_restart_path)
-print(f"Training starting")
-loss = trainer.train(300, stop_at_loss = 0.2)  
-trainer.save(decoder_paramters_save_path)
+print("Training starting")
+#trainer.load('checkpoints/mesh-transformer.ckpt.epoch_8_avg_loss_0.927.pt')
+
+loss = trainer.train(300, stop_at_loss = 0.5)  
+trainer.save(f'{working_dir}/mesh-transformer_lr-2.pt')
 
 
