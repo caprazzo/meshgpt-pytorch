@@ -1,5 +1,54 @@
 <img src="./meshgpt.png" width="450px"></img>
 
+## Google Cloud
+
+
+### Open ports for jupyter
+
+gcloud compute --project=robotml-197117 firewall-rules create jupyter --description="Ports for Jupyter" --direction=INGRESS --priority=1000 --network=default --action=ALLOW --rules=tcp:8081-8090 --source-ranges=0.0.0.0/0
+
+### SSH to second node on gcloud
+
+    gcloud compute ssh --zone "us-central1-a" "instance-20240805-061828" --project "robotml-197117"
+
+### Stop Instance
+
+    gcloud compute instances stop instance-20240805-061828
+
+
+### Intial Setup 
+
+    sudo apt-get install ubuntu-drivers-common
+    sudo ubuntu-drivers --gpgpu install nvidia
+    sudo reboot
+    nvidia-smi
+
+    sudo apt-get update
+    sudo apt install python3.12-venv
+    git clone ...
+    python3.12 -m venv .venv
+    source .venv/bin/activate
+    pip install .
+    pip install pandas numpy trimesh torchtyping 
+    pip install jupyter nb
+
+    jupyter notebook --generate-config
+    # add to  ~/.jupyter/jupyter_notebook_config.py
+    c.NetbookApp.ip = '0.0.0.0'
+    c.NotebookApp.allow_origin = '*'
+    c.NotebookApp.port = 8081
+
+    # The config above did not fully work so I had to force things this way
+    jupyter notebook --NotebookApp.ip='0.0.0.0'
+
+    jupyter nbconvert --to script ..
+
+
+
+
+
+
+
 ## MeshGPT - Pytorch
 
 Implementation of <a href="https://arxiv.org/abs/2311.15475">MeshGPT</a>, SOTA Mesh generation using Attention, in Pytorch
